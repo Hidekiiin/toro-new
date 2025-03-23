@@ -90,7 +90,6 @@ useEffect(() => {
           socket.disconnect();
         }
       };
-    };
 
     initSocket();
   }, []);
