@@ -1,8 +1,19 @@
 import { useEffect, useState, useRef } from 'react';
-import { v4 as uuidv4 } from 'uuid';
-import io from 'socket.io-client';
-import Peer from 'simple-peer';
+import dynamic from 'next/dynamic';
 
+// クライアントサイドでのみSocket.ioをインポート
+const io = dynamic(() => import('socket.io-client'), {
+  ssr: false,
+});
+
+// クライアントサイドでのみSimple Peerをインポート
+const Peer = dynamic(() => import('simple-peer'), {
+  ssr: false,
+});
+
+import { v4 as uuidv4 } from 'uuid';
+
+// グローバル変数
 let socket;
 
 export default function Home() {
@@ -10,426 +21,246 @@ export default function Home() {
   const [isSearching, setIsSearching] = useState(false);
   const [inCall, setInCall] = useState(false);
   const [callStatus, setCallStatus] = useState('');
-  const [roomId, setRoomId] = useState(null);
-  const [peerId, setPeerId] = useState(null);
   
   const localAudioRef = useRef(null);
   const remoteAudioRef = useRef(null);
   const peerRef = useRef(null);
   const localStreamRef = useRef(null);
+  const roomIdRef = useRef(null);
+  const peerIdRef = useRef(null);
 
   // Socket.io接続の初期化
-useEffect(() => {
-  const initSocket = async () => {
-    await fetch('/api/socket');
-    socket = io({
-      path: '/api/socketio',  // パスを変更
-    });
+  useEffect(() => {
+    // クライアントサイドでのみ実行
+    if (typeof window === 'undefined') return;
 
-    socket.on('connect', () => {
-      console.log('Socket connected');
-      setIsConnected(true);
-    });
-
-    // 以下は元のコードと同じ...
-  };
-
-
-      socket.on('disconnect', () => {
-        console.log('Socket disconnected');
-        setIsConnected(false);
-        handleCallEnd();
-      });
-
-      // マッチング成功時
-      socket.on('matched', ({ roomId, peer }) => {
-        console.log(`Matched with ${peer} in room ${roomId}`);
-        setIsSearching(false);
-        setInCall(true);
-        setRoomId(roomId);
-        setPeerId(peer);
-        setCallStatus('接続中...');
+    const initSocket = async () => {
+      try {
+        await fetch('/api/socket');
         
-        // 発信側はオファーを作成
-        startCall(peer, true);
-      });
+        // Socket.ioクライアントの初期化
+        const socketIo = await import('socket.io-client');
+        socket = socketIo.default({
+          path: '/api/socketio',
+        });
 
-      // オファー受信時
-      socket.on('receive-offer', async ({ from, offer }) => {
-        console.log(`Received offer from ${from}`);
-        if (!inCall) return;
-        
-        // 着信側はオファーを受け取り、アンサーを作成
-        await handleReceiveOffer(from, offer);
-      });
+        socket.on('connect', () => {
+          console.log('Socket connected');
+          setIsConnected(true);
+        });
 
-      // アンサー受信時
-      socket.on('receive-answer', ({ from, answer }) => {
-        console.log(`Received answer from ${from}`);
-        if (!inCall || !peerRef.current) return;
-        
-        peerRef.current.signal(answer);
-      });
+        socket.on('disconnect', () => {
+          console.log('Socket disconnected');
+          setIsConnected(false);
+          handleCallEnd();
+        });
 
-      // ICE candidate受信時
-      socket.on('receive-ice-candidate', ({ from, candidate }) => {
-        console.log(`Received ICE candidate from ${from}`);
-        if (!inCall || !peerRef.current) return;
-        
-        peerRef.current.signal(candidate);
-      });
+        socket.on('matched', ({ roomId, peer }) => {
+          console.log(`Matched with peer ${peer} in room ${roomId}`);
+          roomIdRef.current = roomId;
+          peerIdRef.current = peer;
+          setCallStatus('マッチングしました！接続中...');
+          startCall(true);
+        });
 
-      // 通話終了時
-      socket.on('call-ended', () => {
-        console.log('Call ended by peer');
-        handleCallEnd();
-      });
+        socket.on('receive-offer', async ({ from, offer }) => {
+          console.log(`Received offer from ${from}`);
+          if (peerRef.current) {
+            peerRef.current.signal(offer);
+          }
+        });
 
-      return () => {
-        if (socket) {
-          socket.disconnect();
-        }
-      };
+        socket.on('receive-answer', ({ from, answer }) => {
+          console.log(`Received answer from ${from}`);
+          if (peerRef.current) {
+            peerRef.current.signal(answer);
+          }
+        });
+
+        socket.on('receive-ice-candidate', ({ from, candidate }) => {
+          if (peerRef.current) {
+            peerRef.current.signal(candidate);
+          }
+        });
+
+        socket.on('call-ended', () => {
+          console.log('Call ended by peer');
+          setCallStatus('相手が通話を終了しました');
+          handleCallEnd();
+        });
+      } catch (error) {
+        console.error('Socket initialization error:', error);
+        setCallStatus('サーバー接続エラー');
+      }
+    };
 
     initSocket();
-  }, []);
 
-  // 通話開始処理
-  const startCall = async (targetPeerId, isInitiator) => {
-    try {
-      // マイクの音声ストリームを取得
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      localStreamRef.current = stream;
-      
-      // ローカルの音声をミュート（自分の声が自分に聞こえないようにする）
-      if (localAudioRef.current) {
-        localAudioRef.current.srcObject = stream;
-        localAudioRef.current.muted = true;
+    return () => {
+      if (socket) {
+        socket.disconnect();
       }
-
-      // WebRTC Peer接続の設定
-      const peer = new Peer({
-        initiator: isInitiator,
-        trickle: true,
-        stream: stream,
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:global.stun.twilio.com:3478' }
-          ]
-        }
-      });
-
-      // シグナリングデータ送信時
-      peer.on('signal', data => {
-        console.log('Generated signal data', data.type);
-        
-        if (data.type === 'offer') {
-          socket.emit('send-offer', { target: targetPeerId, offer: data });
-        } else if (data.type === 'answer') {
-          socket.emit('send-answer', { target: targetPeerId, answer: data });
-        } else {
-          socket.emit('send-ice-candidate', { target: targetPeerId, candidate: data });
-        }
-      });
-
-      // 相手のストリーム受信時
-      peer.on('stream', stream => {
-        console.log('Received remote stream');
-        setCallStatus('通話中');
-        
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = stream;
-          remoteAudioRef.current.play().catch(err => console.error('Error playing audio:', err));
-        }
-      });
-
-      // 接続確立時
-      peer.on('connect', () => {
-        console.log('Peer connection established');
-        setCallStatus('通話中');
-      });
-
-      // エラー発生時
-      peer.on('error', err => {
-        console.error('Peer connection error:', err);
-        setCallStatus('エラーが発生しました');
-        handleCallEnd();
-      });
-
-      // 接続終了時
-      peer.on('close', () => {
-        console.log('Peer connection closed');
-        handleCallEnd();
-      });
-
-      peerRef.current = peer;
-    } catch (err) {
-      console.error('Error starting call:', err);
-      setCallStatus('マイクへのアクセスに失敗しました');
-      handleCallEnd();
-    }
-  };
-
-  // オファー受信処理
-  const handleReceiveOffer = async (from, offer) => {
-    try {
-      // 着信側のPeer接続を開始
-      await startCall(from, false);
-      
-      // 受信したオファーを設定
-      peerRef.current.signal(offer);
-    } catch (err) {
-      console.error('Error handling offer:', err);
-    }
-  };
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []);
 
   // ランダムマッチング開始
   const findRandomMatch = () => {
-    if (!isConnected) return;
-    
+    if (!isConnected) {
+      setCallStatus('サーバーに接続されていません');
+      return;
+    }
+
     setIsSearching(true);
     setCallStatus('相手を探しています...');
     socket.emit('find-random-match');
   };
 
+  // 通話開始
+  const startCall = async (isInitiator) => {
+    try {
+      // マイクへのアクセス許可を取得
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      localStreamRef.current = stream;
+      
+      if (localAudioRef.current) {
+        localAudioRef.current.srcObject = stream;
+      }
+
+      // Simple Peerのインポート
+      const SimplePeer = await import('simple-peer');
+
+      // WebRTC Peer接続の設定
+      const peer = new SimplePeer.default({
+        initiator: isInitiator,
+        trickle: true,
+        stream: stream
+      });
+
+      peer.on('signal', data => {
+        if (isInitiator) {
+          socket.emit('send-offer', { target: peerIdRef.current, offer: data });
+        } else {
+          socket.emit('send-answer', { target: peerIdRef.current, answer: data });
+        }
+      });
+
+      peer.on('stream', stream => {
+        setCallStatus('通話中');
+        setInCall(true);
+        setIsSearching(false);
+        
+        if (remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = stream;
+        }
+      });
+
+      peer.on('close', () => {
+        handleCallEnd();
+      });
+
+      peer.on('error', err => {
+        console.error('Peer error:', err);
+        setCallStatus('接続エラーが発生しました');
+        handleCallEnd();
+      });
+
+      peerRef.current = peer;
+
+    } catch (err) {
+      console.error('Failed to get media devices:', err);
+      setCallStatus('マイクへのアクセスが拒否されました');
+      setIsSearching(false);
+    }
+  };
+
+  // 通話終了
+  const endCall = () => {
+    if (roomIdRef.current && socket) {
+      socket.emit('end-call', { roomId: roomIdRef.current });
+    }
+    handleCallEnd();
+  };
+
   // 通話終了処理
   const handleCallEnd = () => {
-    setInCall(false);
-    setIsSearching(false);
-    setCallStatus('');
-    setPeerId(null);
-    
-    // ルームIDがある場合は通話終了を通知
-    if (roomId) {
-      socket.emit('end-call', { roomId });
-      setRoomId(null);
-    }
-    
-    // Peer接続を閉じる
     if (peerRef.current) {
       peerRef.current.destroy();
       peerRef.current = null;
     }
-    
-    // ローカルストリームを停止
+
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => track.stop());
       localStreamRef.current = null;
     }
+
+    if (localAudioRef.current) {
+      localAudioRef.current.srcObject = null;
+    }
+
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = null;
+    }
+
+    roomIdRef.current = null;
+    peerIdRef.current = null;
+    setInCall(false);
+    setIsSearching(false);
   };
 
   return (
-    <div className="container">
-      <main>
-        <h1 className="title">toro</h1>
-        <p className="description">ランダム音声チャットアプリ</p>
-
-        <div className="chat-container">
-          {/* ステータス表示 */}
-          <div className="status-area">
-            <div className={`status-indicator ${isConnected ? 'connected' : 'disconnected'}`}>
-              {isConnected ? 'オンライン' : 'オフライン'}
-            </div>
-            {callStatus && <div className="call-status">{callStatus}</div>}
-          </div>
-
-          {/* 音声要素（非表示） */}
-          <audio ref={localAudioRef} autoPlay playsInline muted />
-          <audio ref={remoteAudioRef} autoPlay playsInline />
-
-          {/* アクション領域 */}
-          <div className="action-area">
-            {!inCall ? (
-              <button 
-                className={`match-button ${isSearching ? 'searching' : ''}`}
-                onClick={findRandomMatch}
-                disabled={!isConnected || isSearching}
-              >
-                {isSearching ? '検索中...' : 'ランダムマッチング'}
-              </button>
-            ) : (
-              <button 
-                className="end-call-button"
-                onClick={handleCallEnd}
-              >
-                通話を終了
-              </button>
-            )}
+    <div className="min-h-screen bg-gradient-to-br from-purple-500 to-indigo-700 flex flex-col items-center justify-center p-4">
+      <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
+        <h1 className="text-3xl font-bold text-center text-indigo-700 mb-6">toro</h1>
+        <p className="text-center text-gray-600 mb-8">ランダム音声チャットアプリ</p>
+        
+        <div className="mb-6 text-center">
+          <div className="text-sm text-gray-500 mb-2">ステータス</div>
+          <div className={`font-medium ${inCall ? 'text-green-600' : 'text-gray-700'}`}>
+            {isConnected ? (callStatus || 'サーバーに接続されています') : '接続中...'}
           </div>
         </div>
-      </main>
 
-      <footer>
-        <p>Powered by Next.js, WebRTC and Socket.io</p>
+        <div className="flex justify-center mb-8">
+          {!inCall && !isSearching ? (
+            <button
+              onClick={findRandomMatch}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-300 transform hover:scale-105"
+              disabled={!isConnected}
+            >
+              ランダムマッチング開始
+            </button>
+          ) : inCall ? (
+            <button
+              onClick={endCall}
+              className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-300"
+            >
+              通話終了
+            </button>
+          ) : (
+            <button
+              className="bg-gray-400 text-white font-bold py-3 px-6 rounded-full shadow-lg cursor-not-allowed"
+              disabled
+            >
+              相手を探しています...
+            </button>
+          )}
+        </div>
+
+        <div className="text-center text-sm text-gray-500">
+          <p>マイクへのアクセスを許可してください</p>
+          <p className="mt-1">ランダムな相手と音声チャットを楽しみましょう</p>
+        </div>
+      </div>
+
+      <audio ref={localAudioRef} autoPlay muted className="hidden" />
+      <audio ref={remoteAudioRef} autoPlay className="hidden" />
+      
+      <footer className="mt-8 text-center text-white text-sm opacity-70">
+        <p>© 2025 toro - ランダム音声チャットアプリ</p>
       </footer>
-
-      <style jsx>{`
-        .container {
-          min-height: 100vh;
-          padding: 0 0.5rem;
-          display: flex;
-          flex-direction: column;
-          justify-content: center;
-          align-items: center;
-          background: linear-gradient(135deg, #6e8efb, #a777e3);
-        }
-
-        main {
-          padding: 5rem 0;
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          justify-content: center;
-          align-items: center;
-        }
-
-        footer {
-          width: 100%;
-          height: 50px;
-          border-top: 1px solid #eaeaea;
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          background-color: rgba(255, 255, 255, 0.1);
-        }
-
-        footer p {
-          color: white;
-        }
-
-        .title {
-          margin: 0;
-          line-height: 1.15;
-          font-size: 4rem;
-          color: white;
-          text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.2);
-        }
-
-        .description {
-          text-align: center;
-          line-height: 1.5;
-          font-size: 1.5rem;
-          color: white;
-          margin-bottom: 2rem;
-        }
-
-        .chat-container {
-          width: 100%;
-          max-width: 500px;
-          background-color: white;
-          border-radius: 15px;
-          padding: 2rem;
-          box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-        }
-
-        .status-area {
-          width: 100%;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          margin-bottom: 2rem;
-        }
-
-        .status-indicator {
-          padding: 0.5rem 1rem;
-          border-radius: 20px;
-          font-weight: bold;
-          margin-bottom: 1rem;
-        }
-
-        .connected {
-          background-color: #4caf50;
-          color: white;
-        }
-
-        .disconnected {
-          background-color: #f44336;
-          color: white;
-        }
-
-        .call-status {
-          font-size: 1.2rem;
-          color: #333;
-        }
-
-        .action-area {
-          width: 100%;
-          display: flex;
-          justify-content: center;
-        }
-
-        .match-button, .end-call-button {
-          padding: 1rem 2rem;
-          font-size: 1.2rem;
-          border: none;
-          border-radius: 50px;
-          cursor: pointer;
-          transition: all 0.3s ease;
-          font-weight: bold;
-          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-
-        .match-button {
-          background-color: #4caf50;
-          color: white;
-        }
-
-        .match-button:hover {
-          background-color: #388e3c;
-          transform: translateY(-2px);
-        }
-
-        .match-button:disabled {
-          background-color: #cccccc;
-          cursor: not-allowed;
-          transform: none;
-        }
-
-        .searching {
-          animation: pulse 1.5s infinite;
-        }
-
-        .end-call-button {
-          background-color: #f44336;
-          color: white;
-        }
-
-        .end-call-button:hover {
-          background-color: #d32f2f;
-          transform: translateY(-2px);
-        }
-
-        @keyframes pulse {
-          0% {
-            transform: scale(1);
-          }
-          50% {
-            transform: scale(1.05);
-          }
-          100% {
-            transform: scale(1);
-          }
-        }
-      `}</style>
-
-      <style jsx global>{`
-        html,
-        body {
-          padding: 0;
-          margin: 0;
-          font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto,
-            Oxygen, Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue,
-            sans-serif;
-        }
-
-        * {
-          box-sizing: border-box;
-        }
-      `}</style>
     </div>
   );
 }
