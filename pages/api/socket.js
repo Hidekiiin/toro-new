@@ -1,13 +1,19 @@
 import { Server } from 'socket.io';
 
 export default function SocketHandler(req, res) {
+  // すでにSocket.ioサーバーが起動している場合は何もしない
   if (res.socket.server.io) {
     console.log('Socket is already running');
     res.end();
     return;
   }
 
-  const io = new Server(res.socket.server);
+  // Socket.ioサーバーを初期化
+  const io = new Server(res.socket.server, {
+    path: '/api/socketio',  // パスを変更
+    addTrailingSlash: false,
+  });
+  
   res.socket.server.io = io;
 
   // ユーザー管理
@@ -21,6 +27,7 @@ export default function SocketHandler(req, res) {
     console.log(`User connected: ${socket.id}`);
     users[socket.id] = { id: socket.id, inCall: false };
 
+    // 以下は元のコードと同じ...
     // ユーザーがランダムマッチングを要求
     socket.on('find-random-match', () => {
       console.log(`User ${socket.id} is looking for a match`);

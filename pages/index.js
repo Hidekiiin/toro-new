@@ -19,15 +19,21 @@ export default function Home() {
   const localStreamRef = useRef(null);
 
   // Socket.io接続の初期化
-  useEffect(() => {
-    const initSocket = async () => {
-      await fetch('/api/socket');
-      socket = io();
+useEffect(() => {
+  const initSocket = async () => {
+    await fetch('/api/socket');
+    socket = io({
+      path: '/api/socketio',  // パスを変更
+    });
 
-      socket.on('connect', () => {
-        console.log('Socket connected');
-        setIsConnected(true);
-      });
+    socket.on('connect', () => {
+      console.log('Socket connected');
+      setIsConnected(true);
+    });
+
+    // 以下は元のコードと同じ...
+  };
+
 
       socket.on('disconnect', () => {
         console.log('Socket disconnected');
