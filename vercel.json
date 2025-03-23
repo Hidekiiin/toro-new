@@ -1,9 +1,10 @@
 {
-  "version": 2,
-  "functions": {
-    "api/socket.js": {
-      "memory": 1024,
-      "maxDuration": 10
+    "version": 2,
+    "functions": {
+      "pages/api/socket.js": {
+        "memory": 1024,
+        "maxDuration": 10
+      }
     }
   }
-}
+  
